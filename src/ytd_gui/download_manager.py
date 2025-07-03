@@ -6,10 +6,12 @@ import os
 import threading
 import subprocess
 import json
+import time
+import platform
 from typing import Dict, List, Any, Tuple, TYPE_CHECKING
 
 from PyQt6.QtWidgets import QMessageBox, QDialog, QScrollArea, QWidget, QVBoxLayout, QLabel, QCheckBox, QHBoxLayout, QPushButton
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon
 
 if TYPE_CHECKING:
@@ -20,7 +22,28 @@ class DownloadManager:
     """Handles the download queue and execution."""
 
     def __init__(self, main_app: 'YTDGUI'):
+        """
+        Initialize the download manager.
+
+        Args:
+            main_app: Reference to the main application
+        """
         self.main_app = main_app
+        self.download_queue: List[Dict[str, Any]] = []
+        self.is_processing = False
+
+    def _get_yt_dlp_path(self) -> str:
+        """
+        Get the appropriate yt-dlp path based on the platform.
+        
+        Returns:
+            str: Path to yt-dlp executable
+        """
+        if platform.system() == "Windows":
+            return os.path.join(self.main_app.base_dir, "bin", "yt-dlp.exe")
+        else:
+            # For macOS and Linux, use system-installed yt-dlp
+            return "yt-dlp"
 
     def add_to_queue(self) -> None:
         """
@@ -94,11 +117,15 @@ class DownloadManager:
             "mode": mode,
             "audio_quality": self.main_app.audio_quality_default if "MP3" in mode else None,
             "video_quality": self.main_app.video_quality_combo.currentText() if "MP3" not in mode else "Best Available",
+            "timestamp": time.time()
         }
 
-        self.main_app.download_queue.append(task)
+        self.download_queue.append(task)
         self.main_app.log_message(f"Task added to queue: {mode}")
-        self.process_queue()
+
+        # Start processing if not already running
+        if not self.is_processing:
+            self.process_queue()
 
     def process_playlist(self, url: str, save_path: str, mode: str) -> None:
         """
@@ -110,8 +137,8 @@ class DownloadManager:
             mode: Download mode (Playlist Video/MP3)
         """
         try:
-            # Use yt-dlp.exe to extract playlist information
-            yt_dlp_path = os.path.join(self.main_app.base_dir, "bin", "yt-dlp.exe")
+            # Use yt-dlp to extract playlist information
+            yt_dlp_path = self._get_yt_dlp_path()
             cmd = [yt_dlp_path, "--quiet", "--flat-playlist", "--dump-json", url]
 
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -159,8 +186,8 @@ class DownloadManager:
             url = url.rstrip("/") + suffix
 
         try:
-            # Use yt-dlp.exe to extract channel information
-            yt_dlp_path = os.path.join(self.main_app.base_dir, "bin", "yt-dlp.exe")
+            # Use yt-dlp to extract channel information
+            yt_dlp_path = self._get_yt_dlp_path()
             cmd = [yt_dlp_path, "--quiet", "--flat-playlist", "--dump-json", url]
 
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -313,8 +340,9 @@ class DownloadManager:
                     "mode": mode,
                     "audio_quality": self.main_app.audio_quality_default if "MP3" in mode else None,
                     "video_quality": self.main_app.video_quality_combo.currentText() if "MP3" not in mode else "Best Available",
+                    "timestamp": time.time()
                 }
-                self.main_app.download_queue.append(task)
+                self.download_queue.append(task)
                 selected_count += 1
 
         if selected_count == 0:
@@ -327,7 +355,10 @@ class DownloadManager:
 
         # Switch to activity page and start downloads
         self.main_app.ui_manager.switch_page("Activity")
-        self.process_queue()
+
+        # Start processing if not already running
+        if not self.is_processing:
+            self.process_queue()
 
     def process_queue(self) -> None:
         """
@@ -338,11 +369,11 @@ class DownloadManager:
         """
         # Update queue status
         if hasattr(self.main_app, 'queue_status_label'):
-            self.main_app.queue_status_label.setText(f"Queue: {len(self.main_app.download_queue)} pending")
+            self.main_app.queue_status_label.setText(f"Queue: {len(self.download_queue)} pending")
 
         # Start next download if not already downloading and queue has items
-        if not self.main_app.downloading and self.main_app.download_queue:
-            task = self.main_app.download_queue.pop(0)
+        if not self.main_app.downloading and self.download_queue:
+            task = self.download_queue.pop(0)
             self.main_app.downloading = True
 
             # Start download in background thread
@@ -354,7 +385,7 @@ class DownloadManager:
 
     def download_video(self, task: Dict[str, Any]) -> None:
         """
-        Download video/audio based on task configuration using yt-dlp.exe.
+        Download video/audio based on task configuration using yt-dlp.
 
         Args:
             task: Dictionary containing download configuration
@@ -370,13 +401,20 @@ class DownloadManager:
         save_path = task["save_path"]
         mode = task["mode"]
         video_quality = task.get("video_quality", "Best Available")
+        audio_quality = task.get("audio_quality", "320")
 
         self.main_app.update_status(f"Starting download: {os.path.basename(url)}")
 
         try:
-            # Get yt-dlp.exe path
-            yt_dlp_path = os.path.join(self.main_app.base_dir, "bin", "yt-dlp.exe")
-            ffmpeg_path = os.path.join(self.main_app.base_dir, "bin", "ffmpeg.exe")
+            # Get yt-dlp path
+            yt_dlp_path = self._get_yt_dlp_path()
+            
+            # Get ffmpeg path based on platform
+            if platform.system() == "Windows":
+                ffmpeg_path = os.path.join(self.main_app.base_dir, "bin", "ffmpeg.exe")
+            else:
+                # For macOS and Linux, use full path to ensure yt-dlp finds it
+                ffmpeg_path = "/opt/homebrew/bin/ffmpeg"
 
             # Build command based on mode
             if "Video" in mode and "MP3" not in mode:
@@ -384,8 +422,7 @@ class DownloadManager:
                 cmd = self._build_video_download_command(yt_dlp_path, ffmpeg_path, url, save_path, video_quality)
             else:
                 # Audio extraction
-                cmd = self._build_audio_download_command(yt_dlp_path, ffmpeg_path, url, save_path,
-                                                         task.get("audio_quality", "320"))
+                cmd = self._build_audio_download_command(yt_dlp_path, ffmpeg_path, url, save_path, audio_quality)
 
             # Add cookie support if enabled
             if self.main_app.use_cookies and self.main_app.cookie_file:

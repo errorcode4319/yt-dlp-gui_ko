@@ -7,6 +7,7 @@ import json
 import urllib.request
 import shutil
 import stat
+import platform
 from typing import Dict, List, Optional, Callable, Tuple
 
 from PyQt6.QtWidgets import QWidget
@@ -33,7 +34,13 @@ class Updater:
         """
         self.base_dir = base_dir
         self.parent = parent
-        self.yt_dlp_path = os.path.join(self.base_dir, "bin", "yt-dlp.exe")
+        
+        # Set yt-dlp path based on platform
+        if platform.system() == "Windows":
+            self.yt_dlp_path = os.path.join(self.base_dir, "bin", "yt-dlp.exe")
+        else:
+            # For macOS and Linux, use system-installed yt-dlp
+            self.yt_dlp_path = "yt-dlp"
 
     def get_latest_yt_version(self) -> Tuple[str, List[Dict]]:
         """
@@ -64,6 +71,11 @@ class Updater:
         Raises:
             Exception: If download or installation fails
         """
+        # Skip download for non-Windows systems
+        if platform.system() != "Windows":
+            progress_callback("Using system-installed yt-dlp (pip install yt-dlp)")
+            return
+            
         version, assets = self.get_latest_yt_version()
 
         # Find the executable asset in the release
